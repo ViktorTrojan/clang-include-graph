@@ -1,40 +1,76 @@
-name: Create Release and Upload Binary
+name: Build release binary and update PKGBUILD.bin
 
 on:
   push:
     tags:
-      - 'v*.*.*' # Triggers on tags like v1.0.0, v0.1.0
+      - '*.*.*'   # matches tags like 0.2.0
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest # Using ubuntu-latest for simplicity, can be changed to Arch Linux runner or Docker
+  build-and-update:
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y git make gcc g++ cmake clang-19 libclang-19-dev libclang-cpp19-dev libboost-log1.83-dev libboost-graph1.83-dev libboost-filesystem1.83-dev libboost-test1.83-dev libboost-json1.83-dev libboost-program-options1.83-dev
+      - name: Set TAG env
+        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
-    - name: Build project
-      run: |
-        mkdir build
-        cmake -B build -S . \
-          -DCMAKE_INSTALL_PREFIX=/usr \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_CONFIG_PATH=/usr/bin/llvm-config-19 # Adjust LLVM version if needed
-        cmake --build build
+      - name: Build inside Arch Linux container
+        env:
+          TAG: ${{ env.TAG }}
+        run: |
+          docker run --rm -e TAG="$TAG" -v "${{ github.workspace }}:/workspace" -w /workspace archlinux:latest /bin/bash -lc '
+            set -euo pipefail
+            pacman -Sy --noconfirm archlinux-keyring
+            pacman-key --init
+            pacman-key --populate archlinux
+            pacman -Syu --noconfirm --needed base-devel cmake clang llvm boost git
 
-    - name: Package binaries
-      run: |
-        tar -czf clang-include-graph-${{ github.ref_name }}-x86_64.tar.gz -C build/release clang-include-graph
+            mkdir -p build
+            cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+            cmake --build build -- -j$(nproc)
 
-    - name: Create Release and Upload Asset
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: clang-include-graph-${{ github.ref_name }}-x86_64.tar.gz
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            BIN=$(find build -type f -executable -name clang-include-graph -print -quit)
+            if [ -z "$BIN" ]; then echo "No binary found"; exit 1; fi
+
+            mkdir -p artifacts
+            cp "$BIN" artifacts/clang-include-graph
+            tar -C artifacts -czf "artifacts/clang-include-graph-${TAG}-x86_64.tar.gz" clang-include-graph
+          '
+
+      - name: Upload tarball to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/clang-include-graph-${{ env.TAG }}-x86_64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # - name: Clone PKGBUILD repo
+      #   env:
+      #     PKG_REPO_PAT: ${{ secrets.PKG_REPO_PAT }}  # GitHub PAT with repo scope
+      #   run: |
+      #     git config --global user.email "actions@github.com"
+      #     git config --global user.name "GitHub Actions"
+      #     git clone https://$PKG_REPO_PAT@github.com/ViktorTrojan/arch_clang-include-graph pkgrepo
+
+      # - name: Update PKGBUILD.bin
+      #   env:
+      #     TAG: ${{ env.TAG }}
+      #   run: |
+      #     cd pkgrepo
+
+      #     # update pkgver
+      #     sed -i "s/^pkgver=.*/pkgver=${TAG}/" PKGBUILD.bin
+
+      #     # update source URL
+      #     sed -i "s|^source=.*|source=(\"${pkgname}-${TAG}-x86_64.tar.gz::https://github.com/${{ github.repository }}/releases/download/${TAG}/clang-include-graph-${TAG}-x86_64.tar.gz\")|" PKGBUILD.bin
+
+      #     # download released tarball for checksum
+      #     curl -sL -o /tmp/clang-include-graph-${TAG}.tar.gz "https://github.com/${{ github.repository }}/releases/download/${TAG}/clang-include-graph-${TAG}-x86_64.tar.gz"
+      #     CHK=$(sha256sum /tmp/clang-include-graph-${TAG}.tar.gz | cut -d' ' -f1)
+      #     sed -i "s/^sha256sums=.*/sha256sums=('${CHK}')/" PKGBUILD.bin
+
+      #     git add PKGBUILD.bin
+      #     git commit -m "Update PKGBUILD.bin to ${TAG}"
+      #     git push origin main
