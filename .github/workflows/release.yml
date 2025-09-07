@@ -1,0 +1,40 @@
+name: Create Release and Upload Binary
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # Triggers on tags like v1.0.0, v0.1.0
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest # Using ubuntu-latest for simplicity, can be changed to Arch Linux runner or Docker
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git make gcc g++ cmake clang-19 libclang-19-dev libclang-cpp19-dev libboost-log1.83-dev libboost-graph1.83-dev libboost-filesystem1.83-dev libboost-test1.83-dev libboost-json1.83-dev libboost-program-options1.83-dev
+
+    - name: Build project
+      run: |
+        mkdir build
+        cmake -B build -S . \
+          -DCMAKE_INSTALL_PREFIX=/usr \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_CONFIG_PATH=/usr/bin/llvm-config-19 # Adjust LLVM version if needed
+        cmake --build build
+
+    - name: Package binaries
+      run: |
+        tar -czf clang-include-graph-${{ github.ref_name }}-x86_64.tar.gz -C build/release clang-include-graph
+
+    - name: Create Release and Upload Asset
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: clang-include-graph-${{ github.ref_name }}-x86_64.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
